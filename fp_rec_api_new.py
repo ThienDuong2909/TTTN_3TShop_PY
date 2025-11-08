@@ -55,14 +55,14 @@ def init_cache_tables(conn):
             CREATE TABLE IF NOT EXISTS FP_Rules (
                 id INT PRIMARY KEY AUTO_INCREMENT,
                 model_id INT NOT NULL,
-                antecedent JSON NOT NULL COMMENT 'Tập A (MaSP)',
+                antecedent TEXT NOT NULL COMMENT 'Tập A (MaSP) - JSON array',
                 consequent INT NOT NULL COMMENT 'Item b (MaSP)',
-                itemset JSON NOT NULL COMMENT 'Tập X = A ∪ {b}',
+                itemset TEXT NOT NULL COMMENT 'Tập X = A ∪ {b} - JSON array',
                 support FLOAT NOT NULL,
                 confidence FLOAT NOT NULL,
                 lift FLOAT NOT NULL,
                 INDEX idx_model (model_id),
-                INDEX idx_antecedent_size ((JSON_LENGTH(antecedent))),
+                INDEX idx_consequent (consequent),
                 FOREIGN KEY (model_id) REFERENCES FP_ModelMetadata(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
@@ -72,7 +72,7 @@ def init_cache_tables(conn):
             CREATE TABLE IF NOT EXISTS FP_FrequentItemsets (
                 id INT PRIMARY KEY AUTO_INCREMENT,
                 model_id INT NOT NULL,
-                itemset JSON NOT NULL COMMENT 'Frequent itemset (MaSP)',
+                itemset TEXT NOT NULL COMMENT 'Frequent itemset (MaSP) - JSON array',
                 support_count INT NOT NULL,
                 support_ratio FLOAT NOT NULL,
                 INDEX idx_model (model_id),
