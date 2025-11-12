@@ -117,31 +117,62 @@ def save_model_to_db(conn, cache_data, min_sup, min_conf):
         # Insert rules (batch insert để tăng tốc)
         if cache_data["rules"]:
             rules_values = []
-            for r in cache_data["rules"]:
+            print(f"\n{'='*90}")
+            print(f"SAVING RULES TO DB (model_id={model_id})")
+            print(f"- Total rules to save: {len(cache_data['rules'])}")
+            
+            # Log một vài rules mẫu
+            sample_size = min(5, len(cache_data["rules"]))
+            print(f"- Sample rules (first {sample_size}):")
+            
+            for idx, r in enumerate(cache_data["rules"]):
                 import json
+                ant_json = json.dumps(sorted(list(r["A"])))
+                itemset_json = json.dumps(sorted(list(r["X"])))
+                
                 rules_values.append((
                     model_id,
-                    json.dumps(sorted(list(r["A"]))),  # antecedent as JSON
+                    ant_json,                          # antecedent as JSON
                     int(r["b"]),                       # consequent
-                    json.dumps(sorted(list(r["X"]))),  # itemset as JSON
+                    itemset_json,                      # itemset as JSON
                     float(r["support"]),
                     float(r["confidence"]),
                     float(r["lift"])
                 ))
+                
+                # Log sample
+                if idx < sample_size:
+                    print(f"  [{idx+1}] {sorted(list(r['A']))} → {r['b']}")
+                    print(f"      support={r['support']:.4f}, conf={r['confidence']:.4f}, lift={r['lift']:.4f}")
             
             # Batch insert (chunk 1000 để tránh query quá lớn)
             CHUNK = 1000
+            total_chunks = (len(rules_values) + CHUNK - 1) // CHUNK
+            print(f"- Inserting in {total_chunks} batches (chunk_size={CHUNK})...")
+            
             for i in range(0, len(rules_values), CHUNK):
                 chunk = rules_values[i:i+CHUNK]
+                chunk_num = i // CHUNK + 1
                 cur.executemany("""
                     INSERT INTO FP_Rules 
                     (model_id, antecedent, consequent, itemset, support, confidence, lift)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """, chunk)
+                print(f"  ✓ Batch {chunk_num}/{total_chunks}: Inserted {len(chunk)} rules")
         
         # Insert frequent itemsets (optional)
         if cache_data["freq"]:
             freq_values = []
+            print(f"\nSAVING FREQUENT ITEMSETS TO DB")
+            print(f"- Total frequent itemsets: {len(cache_data['freq'])}")
+            
+            # Log một vài frequent itemsets mẫu
+            sample_freq = sorted(
+                cache_data["freq"].items(), 
+                key=lambda kv: (-kv[1], -len(kv[0]))
+            )[:5]
+            print(f"- Top 5 frequent itemsets:")
+            
             for itemset, count in cache_data["freq"].items():
                 import json
                 freq_values.append((
@@ -151,17 +182,34 @@ def save_model_to_db(conn, cache_data, min_sup, min_conf):
                     float(count / cache_data["N"]) if cache_data["N"] > 0 else 0.0
                 ))
             
+            for idx, (itemset, count) in enumerate(sample_freq, 1):
+                support_ratio = count / cache_data["N"] if cache_data["N"] > 0 else 0
+                print(f"  [{idx}] {sorted(list(itemset))}")
+                print(f"      count={count}, support={support_ratio:.4f}")
+            
             CHUNK = 1000
+            total_chunks = (len(freq_values) + CHUNK - 1) // CHUNK
+            print(f"- Inserting in {total_chunks} batches (chunk_size={CHUNK})...")
+            
             for i in range(0, len(freq_values), CHUNK):
                 chunk = freq_values[i:i+CHUNK]
+                chunk_num = i // CHUNK + 1
                 cur.executemany("""
                     INSERT INTO FP_FrequentItemsets 
                     (model_id, itemset, support_count, support_ratio)
                     VALUES (%s, %s, %s, %s)
                 """, chunk)
+                print(f"  ✓ Batch {chunk_num}/{total_chunks}: Inserted {len(chunk)} itemsets")
         
         conn.commit()
-        print(f"✓ Model saved to DB (model_id={model_id}, rules={len(cache_data['rules'])}, freq={len(cache_data['freq'])})")
+        print(f"\n{'='*90}")
+        print(f"✓ MODEL SAVE COMPLETED")
+        print(f"  - Model ID: {model_id}")
+        print(f"  - Rules saved: {len(cache_data['rules'])}")
+        print(f"  - Frequent itemsets saved: {len(cache_data['freq'])}")
+        print(f"  - Transactions (N): {cache_data['N']}")
+        print(f"  - Config: MIN_SUP={min_sup}, MIN_CONF={min_conf}")
+        print(f"{'='*90}\n")
         return model_id
 
 def load_model_from_db(conn, min_sup, min_conf):
@@ -185,9 +233,18 @@ def load_model_from_db(conn, min_sup, min_conf):
             return None
         
         model_id, N, total_rules, total_freq_items, created_at = row
-        print(f"✓ Found cached model (id={model_id}, created={created_at}, rules={total_rules})")
+        print(f"\n{'='*90}")
+        print(f"✓ LOADING MODEL FROM DB CACHE")
+        print(f"  - Model ID: {model_id}")
+        print(f"  - Created at: {created_at}")
+        print(f"  - Transactions (N): {N}")
+        print(f"  - Total rules: {total_rules}")
+        print(f"  - Total frequent itemsets: {total_freq_items}")
+        print(f"  - Config: MIN_SUP={min_sup}, MIN_CONF={min_conf}")
+        print(f"{'='*90}")
         
         # Load rules
+        print(f"\nLoading {total_rules} rules from DB...")
         cur.execute("""
             SELECT antecedent, consequent, itemset, support, confidence, lift
             FROM FP_Rules
@@ -196,20 +253,35 @@ def load_model_from_db(conn, min_sup, min_conf):
         
         import json
         rules = []
+        sample_count = 0
+        max_samples = 5
+        
         for ant_json, cons, itemset_json, sup, conf, lft in cur.fetchall():
             A = frozenset(json.loads(ant_json))
             b = int(cons)
             X = frozenset(json.loads(itemset_json))
-            rules.append({
+            rule = {
                 "A": A,
                 "b": b,
                 "X": X,
                 "support": float(sup),
                 "confidence": float(conf),
                 "lift": float(lft)
-            })
+            }
+            rules.append(rule)
+            
+            # Log samples
+            if sample_count < max_samples:
+                if sample_count == 0:
+                    print(f"  Sample rules (first {max_samples}):")
+                print(f"    [{sample_count+1}] {sorted(list(A))} → {b}")
+                print(f"        support={sup:.4f}, conf={conf:.4f}, lift={lft:.4f}")
+                sample_count += 1
+        
+        print(f"  ✓ Loaded {len(rules)} rules")
         
         # Load frequent itemsets
+        print(f"\nLoading {total_freq_items} frequent itemsets from DB...")
         cur.execute("""
             SELECT itemset, support_count
             FROM FP_FrequentItemsets
@@ -221,15 +293,21 @@ def load_model_from_db(conn, min_sup, min_conf):
             itemset = frozenset(json.loads(itemset_json))
             freq[itemset] = int(count)
         
+        print(f"  ✓ Loaded {len(freq)} frequent itemsets")
+        
         # Build sup_rel
         sup_rel = {X: c/N for X, c in freq.items()}
         
         # Build rules_by_A
+        print(f"\nBuilding rules index by antecedent...")
         rules_by_A = defaultdict(list)
         for r in rules:
             rules_by_A[r["A"]].append(r)
         
-        print(f"✓ Loaded {len(rules)} rules, {len(freq)} frequent itemsets from DB")
+        print(f"  ✓ Created index for {len(rules_by_A)} unique antecedents")
+        print(f"\n{'='*90}")
+        print(f"✓ MODEL LOAD COMPLETED")
+        print(f"{'='*90}\n")
         
         return {
             "N": N,
@@ -435,7 +513,11 @@ def mine_patterns(header, min_sup_count, debug=False):
 # ======================= Rules & cache =======================
 def generate_rules(freq_counts: Dict[frozenset,int], N: int, max_rule_size=MAX_RULE_SIZE):
     sup_rel = {X:c/N for X,c in freq_counts.items()}
-    rules=[]
+    
+    # Sử dụng dict để deduplicate rules theo (A, b)
+    # Key: (A, b), Value: rule dict với metrics cao nhất
+    rules_dict = {}
+    
     for X,cnt in freq_counts.items():
         if len(X)<2 or len(X)>max_rule_size:
             continue
@@ -449,12 +531,33 @@ def generate_rules(freq_counts: Dict[frozenset,int], N: int, max_rule_size=MAX_R
                 for b in B:
                     bset=frozenset([b])
                     lift = (sup_rel[X] / max(sup_rel.get(A,1e-12)*sup_rel.get(bset,1e-12), 1e-12))
-                    rules.append({
-                        "A": A, "b": b, "X": X,
-                        "support": sup_rel[X],
-                        "confidence": conf,
-                        "lift": lift
-                    })
+                    
+                    # Key duy nhất cho rule: (A, b)
+                    rule_key = (A, b)
+                    
+                    # Chỉ giữ rule với metrics tốt hơn (hoặc lần đầu gặp)
+                    if rule_key not in rules_dict:
+                        rules_dict[rule_key] = {
+                            "A": A, "b": b, "X": X,
+                            "support": sup_rel[X],
+                            "confidence": conf,
+                            "lift": lift
+                        }
+                    else:
+                        # So sánh và giữ rule tốt hơn (conf > lift > support)
+                        existing = rules_dict[rule_key]
+                        if (conf > existing["confidence"] or
+                            (conf == existing["confidence"] and lift > existing["lift"]) or
+                            (conf == existing["confidence"] and lift == existing["lift"] and sup_rel[X] > existing["support"])):
+                            rules_dict[rule_key] = {
+                                "A": A, "b": b, "X": X,
+                                "support": sup_rel[X],
+                                "confidence": conf,
+                                "lift": lift
+                            }
+    
+    # Convert dict values to list
+    rules = list(rules_dict.values())
     rules.sort(key=lambda r:(r["confidence"], r["lift"], r["support"]), reverse=True)
     return rules, sup_rel
 
