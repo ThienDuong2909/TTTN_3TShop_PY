@@ -759,6 +759,115 @@ def _score_rule(r, N: int) -> float:
     # score = conf * log(1 + N*support) * sqrt(lift)
     return (r["confidence"] * math.log1p(N * r["support"]) * (r["lift"] ** 0.5))
 
+
+@app.get("/all-rule-recent")
+def all_rule_recent():
+    """
+    Lấy danh sách rules mới nhất trong DB theo MIN_SUP & MIN_CONF hiện tại.
+    Response format tương tự /recommend: {items: [...], groups: [...]}
+    - groups: nhóm theo antecedent (MaSP)
+    - items : danh sách tổng hợp (unique MaSP consequent), giữ rule có score cao nhất
+    """
+    import json
+
+    # MySQL FLOAT so sánh bằng '=' rất dễ lệch do biểu diễn nhị phân.
+    # Dùng khoảng dung sai để tìm đúng model theo config hiện tại.
+    EPS = 1e-4
+
+    conn = db_conn()
+    try:
+        with conn.cursor() as cur:
+            # Model mới nhất đúng config hiện tại
+            cur.execute(
+                """
+                SELECT id, N, total_rules, total_freq_items, created_at
+                FROM FP_ModelMetadata
+                WHERE min_sup BETWEEN %s AND %s
+                  AND min_conf BETWEEN %s AND %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (MIN_SUP - EPS, MIN_SUP + EPS, MIN_CONF - EPS, MIN_CONF + EPS),
+            )
+            row = cur.fetchone()
+            if not row:
+                print(
+                    f"[all-rule-recent] No model found for MIN_SUP={MIN_SUP}, MIN_CONF={MIN_CONF} (EPS={EPS})"
+                )
+                return {"items": [], "groups": []}
+
+            model_id, N, total_rules, total_freq_items, created_at = row
+            print(
+                f"[all-rule-recent] Using model_id={model_id}, created_at={created_at}, N={N}, total_rules={total_rules}, total_freq_items={total_freq_items}"
+            )
+
+            # (optional) touch FP_FrequentItemsets to ensure table present / model complete
+            try:
+                cur.execute(
+                    "SELECT COUNT(*) FROM FP_FrequentItemsets WHERE model_id = %s",
+                    (model_id,),
+                )
+                _ = cur.fetchone()
+            except Exception:
+                pass
+
+            # Load all rules for that model
+            cur.execute(
+                """
+                SELECT antecedent, consequent, itemset, support, confidence, lift
+                FROM FP_Rules
+                WHERE model_id = %s
+                """,
+                (model_id,),
+            )
+            rows = cur.fetchall()
+            print(f"[all-rule-recent] Loaded rules rows: {len(rows)}")
+    finally:
+        conn.close()
+
+    if not rows:
+        return {"rules": []}
+
+    # Trả về từng rule (mỗi dòng trong FP_Rules) kèm metrics.
+    # itemsets trả về phần gợi ý, KHÔNG chứa antecedent: suggestions = X \ A
+    rules_out = []
+    for ant_json, cons, itemset_json, sup, conf, lft in rows:
+        try:
+            antecedent_list = json.loads(ant_json)
+            itemset_list = json.loads(itemset_json)
+            if not isinstance(antecedent_list, list) or not isinstance(itemset_list, list):
+                continue
+            A = frozenset(int(x) for x in antecedent_list)
+            X = frozenset(int(x) for x in itemset_list)
+        except Exception:
+            continue
+
+        suggestions = sorted(list(X - A))
+
+        rules_out.append(
+            {
+                "antecedent": sorted(list(A)),
+                "itemsets": suggestions,
+                "support": round(float(sup), 6),
+                "confidence": round(float(conf), 6),
+                "lift": round(float(lft), 6),
+            }
+        )
+
+    # Deterministic order: antecedent size desc, then metrics desc
+    rules_out.sort(
+        key=lambda r: (
+            -len(r["antecedent"]),
+            r["antecedent"],
+            -r["confidence"],
+            -r["lift"],
+            -r["support"],
+            r["itemsets"],
+        )
+    )
+
+    return {"rules": rules_out}
+
 @app.post("/recommend")
 def recommend(req: RecRequest):
     """
